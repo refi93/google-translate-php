@@ -94,6 +94,11 @@ class TranslateClient
     private $tokenProvider;
 
     /**
+     * @var cache to minimise the amount of google translate requests
+     */
+    private static $translator_cache = [];
+
+    /**
      * @var string Default token generator class name
      */
     private $defaultTokenProvider = GoogleTokenGenerator::class;
@@ -113,6 +118,11 @@ class TranslateClient
      */
     public function __construct($source = null, $target = 'en', $options = [], TokenProviderInterface $tokener = null)
     {
+        if (!self::$translator_cache)
+        {
+          self::initCache();
+        }
+
         $this->httpClient = new GuzzleHttpClient($options); // Create HTTP client
         $this->setSource($source)->setTarget($target); // Set languages
         $this::$lastDetectedSource = false;
@@ -259,6 +269,11 @@ class TranslateClient
             'tk'   => $this->tokenProvider->generateToken($this->sourceLanguage, $this->targetLanguage, $tokenData),
         ]);
 
+        if (self::checkCache($this->sourceLanguage, $this->targetLanguage, $data))
+        {
+          return self::getCache($this->sourceLanguage, $this->targetLanguage, $data);
+        }
+
         $queryUrl = preg_replace('/%5B(?:[0-9]|[1-9][0-9]+)%5D=/', '=', http_build_query($queryArray));
 
         try {
@@ -277,7 +292,74 @@ class TranslateClient
             throw new UnexpectedValueException('Data cannot be decoded or it\'s deeper than the recursion limit');
         }
 
+        self::setCache($this->sourceLanguage, $this->targetLanguage, $data, $bodyArray);
         return $bodyArray;
+    }
+
+    public static function checkCache($source_lang, $target_lang, $data)
+    {
+      $cache = self::$translator_cache;
+      return array_key_exists($source_lang, $cache) && array_key_exists($target_lang, $cache[$source_lang]) && array_key_exists($data, $cache[$source_lang][$target_lang]);
+    }
+
+    public static function getCache($source_lang, $target_lang, $data)
+    {
+      if (!self::checkCache($source_lang, $target_lang, $data))
+      {
+        return null;
+      }
+
+      return self::$translator_cache[$source_lang][$target_lang][$data];
+    }
+
+    public static function setCache($source_lang, $target_lang, $data, $response)
+    { 
+      $cache = &self::$translator_cache;
+      if (!array_key_exists($source_lang, $cache))
+      {
+        $cache[$source_lang] = [];
+      }
+      if (!array_key_exists($target_lang, $cache[$source_lang]))
+      {
+        $cache[$source_lang][$target_lang] = [];
+      }
+      
+      $cache[$source_lang][$target_lang][$data] = $response;
+
+      return true;
+    }
+
+    private static function initCache()
+    {
+      if (!file_exists(self::getCacheFile()))
+      {
+        self::$translator_cache = [];
+      }
+      else
+      {
+        self::$translator_cache = json_decode(file_get_contents(self::getCacheFile()), true);
+      } 
+    }
+
+    public static function storeCache()
+    {
+      if (!is_dir(self::getStorageFolder())) {
+        mkdir(self::getStorageFolder(), 0775, true);
+      }
+
+      file_put_contents(self::getCacheFile(), json_encode(self::$translator_cache, JSON_PRETTY_PRINT));
+
+      return true;
+    }
+
+    private static function getStorageFolder()
+    {
+      return storage_path('vendor/stichoza/GoogleTranslate');
+    }
+
+    public static function getCacheFile()
+    {
+      return self::getStorageFolder().'/translator_cache.JSON';
     }
 
     /**
